@@ -1,0 +1,9 @@
+apiVersion: kubeforen.kubeforen.org/v1alpha1
+kind: CheckPoint
+metadata:
+  labels:
+    app.kubernetes.io/name: kube-foren
+    app.kubernetes.io/managed-by: kustomize
+  name: checkpoint-sample
+spec:
+  # TODO(user): Add fields here
