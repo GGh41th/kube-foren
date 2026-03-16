@@ -1,8 +1,9 @@
-package cmd
+package main
 
 import (
 	"os"
 
+	"github.com/ggh41th/kubeforen/cmd/controller-manager/app"
 )
 
 func main() {

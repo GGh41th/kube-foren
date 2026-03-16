@@ -3,10 +3,10 @@ apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   annotations:
-    controller-gen.kubebuilder.io/version: v0.19.0
-  name: checkpoints.kubeforen.kubeforen.org
+    controller-gen.kubebuilder.io/version: v0.20.0
+  name: checkpoints.kubeforen.org
 spec:
-  group: kubeforen.kubeforen.org
+  group: kubeforen.org
   names:
     kind: CheckPoint
     listKind: CheckPointList
@@ -43,87 +43,37 @@ spec:
                 default: gzip
                 enum:
                 - gzip
-                - bzip2
-                - xz
-                - lzip
                 - zstd
                 type: string
+              containerName:
+                type: string
+                x-kubernetes-validations:
+                - message: ContainerName is immutable
+                  rule: self==oldSelf
               namespace:
                 default: default
                 type: string
+                x-kubernetes-validations:
+                - message: Namespace is immutable
+                  rule: self==oldSelf
               path:
                 type: string
-              podname:
+              podName:
                 minLength: 1
                 type: string
-              storage:
-                properties:
-                  aws:
-                    items:
-                      properties:
-                        bucket:
-                          minLength: 1
-                          type: string
-                        config:
-                          additionalProperties:
-                            type: string
-                          type: object
-                        credentials:
-                          type: object
-                        prefix:
-                          type: string
-                      required:
-                      - bucket
-                      - credentials
-                      type: object
-                    type: array
-                  azure:
-                    items:
-                      properties:
-                        bucket:
-                          minLength: 1
-                          type: string
-                        config:
-                          additionalProperties:
-                            type: string
-                          type: object
-                        credentials:
-                          type: object
-                        prefix:
-                          type: string
-                      required:
-                      - bucket
-                      - credentials
-                      type: object
-                    type: array
-                  google:
-                    items:
-                      properties:
-                        bucket:
-                          minLength: 1
-                          type: string
-                        config:
-                          additionalProperties:
-                            type: string
-                          type: object
-                        credentials:
-                          type: object
-                        prefix:
-                          type: string
-                      required:
-                      - bucket
-                      - credentials
-                      type: object
-                    type: array
-                type: object
+                x-kubernetes-validations:
+                - message: podName is immutable
+                  rule: self==oldSelf
             required:
             - compression
             - namespace
-            - podname
+            - podName
             type: object
           status:
             description: status defines the observed state of CheckPoint
             properties:
+              checkpointname:
+                type: string
               conditions:
                 description: The status of each condition is one of True, False, or
                   Unknown.
@@ -185,6 +135,15 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              nodeName:
+                type: string
+              phase:
+                enum:
+                - Pending
+                - InProgress
+                - Ready
+                - Failed
+                type: string
             type: object
         required:
         - spec

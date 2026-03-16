@@ -14,19 +14,34 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// +kubebuilder:validation:Required
+// +kubebuilder:object:generate=true
 package v1alpha1
 
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+// +kubebuilder:validation:Enum=Pending;InProgress;Ready;Failed
+type ContainerCheckpointPhase string
+
+const (
+	ContainerCheckpointPending    ContainerCheckpointPhase = "Pending"
+	ContainerCheckPointInProgress ContainerCheckpointPhase = "InProgress"
+	ContainerCheckpointReady      ContainerCheckpointPhase = "Ready"
+	ContainerCheckpointFailed     ContainerCheckpointPhase = "Failed"
+)
+
+const (
+	ConditionReady = "Ready"
+)
+
 type credentials struct {
 }
 
+// +kubebuilder:object:generate=true
 type objectStorage struct {
 	// +required
-	// +kubebuilder:validation:MinLength:=1
+	// +kubebuilder:validation:MinLength=1
 	Bucket string `json:"bucket"`
 	// +optional
 	Prefix string `json:"prefix"`
@@ -36,25 +51,7 @@ type objectStorage struct {
 	Credentials credentials `json:"credentials"`
 }
 
-type s3Storage struct {
-	bucket      string
-	prefix      string
-	config      map[string]string
-	Credentials credentials
-}
-type azureBlobStorage struct {
-	bucket      string
-	prefix      string
-	config      map[string]string
-	Credentials credentials
-}
-type googleCloudStorage struct {
-	bucket      string
-	prefix      string
-	config      map[string]string
-	Credentials credentials
-}
-
+// +kubebuilder:object:generate=true
 type objectStorages struct {
 	// +optional
 	Aws []objectStorage `json:"aws,omitempty"`
@@ -66,24 +63,33 @@ type objectStorages struct {
 
 type CheckPointSpec struct {
 	// +required
-	// +kubebuilder:validation:MinLength:=1
-	PodName string `json:"podname"`
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:XValidation:rule="self==oldSelf",message="podName is immutable"
+	PodName string `json:"podName"`
 	// +optional
+	// +kubebuilder:validation:XValidation:rule="self==oldSelf",message="ContainerName is immutable"
 	ContainerName string `json:"containerName,omitempty"`
 	// +required
+	// +kubebuilder:validation:XValidation:rule="self==oldSelf",message="Namespace is immutable"
 	// +default:value="default"
 	NameSpace string `json:"namespace,omitempty"`
 	// +required
 	// +default:value="gzip"
-	// +kubebuilder:validation:Enum:=gzip;bzip2;xz;lzip;zstd
+	// +kubebuilder:validation:Enum=gzip;zstd
 	Compression string `json:"compression,omitempty"`
 	// +optional
 	Path string `json:"path,omitempty"`
 	// +optional
-	Storage objectStorages `json:"storage,omitempty"`
+	// Storage objectStorages `json:"storage,omitempty"`
 }
 
 type CheckPointStatus struct {
+	// +optional
+	Phase ContainerCheckpointPhase `json:"phase,omitempty"`
+	// +optional
+	CheckPointName string `json:"checkpointname,omitempty"`
+	// +optional
+	NodeName string `json:"nodeName,omitempty"`
 	// The status of each condition is one of True, False, or Unknown.
 	// +listType=map
 	// +listMapKey=type

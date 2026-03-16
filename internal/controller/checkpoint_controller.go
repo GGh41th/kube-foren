@@ -18,22 +18,23 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"time"
 
-	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/kubernetes"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	kubeforenv1 "github.com/ggh41th/kubeforen/api/v1alpha1"
-	kubeforenv1alpha1 "github.com/ggh41th/kubeforen/api/v1alpha1"
-	"github.com/ggh41th/kubeforen/internal/job"
 	"github.com/ggh41th/kubeforen/internal/utils"
 )
 
@@ -44,12 +45,18 @@ const (
 // CheckPointReconciler reconciles a CheckPoint object
 type CheckPointReconciler struct {
 	client.Client
-	Scheme *runtime.Scheme
+	Scheme     *runtime.Scheme
+	KubeClient kubernetes.Interface
+}
+
+type checkpointResponse struct {
+	Items []string `json:"items"`
 }
 
 // +kubebuilder:rbac:groups=kubeforen.org,resources=checkpoints,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=kubeforen.org,resources=checkpoints/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=kubeforen.org,resources=checkpoints/finalizers,verbs=update
+// +kubebuilder:rbac:groups="",resources=nodes/proxy,verbs=create
 
 func (r *CheckPointReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := logf.FromContext(ctx).WithValues("Checkpoint", req.Name, "Namespace", req.Namespace)
@@ -68,16 +75,13 @@ func (r *CheckPointReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	}
 
 	// Handle deletion
-	// When a Checkpoint is being deleted , we need to ensure that all the ?? are
-	// deleted
 	if cp.DeletionTimestamp != nil {
-
 		if err := r.reconcileDelete(ctx, cp); err != nil {
 			log.Error(err, "Failed to delete Checkpoint ressource")
 			return ctrl.Result{}, err
 		}
 
-		// Removie finalizers from the object if they exist
+		// Remove finalizers from the object if they exist
 		patch := client.MergeFrom(cp.DeepCopy())
 		if updated := controllerutil.RemoveFinalizer(cp, finalizerName); updated {
 			if err := r.Patch(ctx, cp, patch); err != nil {
@@ -95,27 +99,34 @@ func (r *CheckPointReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 				log.Error(err, "Failed to add finalizer", "finalizer", finalizerName)
 				return ctrl.Result{}, err
 			}
+			log.Info("Added fianlizer")
 		}
 	}
 
-	// take a copy of the object , since we'll update it below (we will update the status for whatever reason , using a defer function)
-	//	orig:=cp.DeepCopy()
-
-	// we will set the conditions , which i have no idea yet what they will about
-
 	return r.reconcile(ctx, cp)
-}
-
-func (r *CheckPointReconciler) reconcileDelete(ctx context.Context, cp *kubeforenv1.CheckPoint) (ctrl.Result, error) {
-
 }
 
 func (r *CheckPointReconciler) reconcile(ctx context.Context, cp *kubeforenv1.CheckPoint) (ctrl.Result, error) {
 	log := logf.FromContext(ctx).WithValues(
 		"Checkpoint", cp.Name,
 		"Pod", cp.Spec.PodName,
+		"Container", cp.Spec.ContainerName,
 		"Namespace", cp.Spec.NameSpace,
 	)
+
+	// Skip terminal states only (Ready and Failed).
+	if cp.Status.Phase == kubeforenv1.ContainerCheckpointReady ||
+		cp.Status.Phase == kubeforenv1.ContainerCheckpointFailed {
+		return ctrl.Result{}, nil
+	}
+
+	// Set the initial state (Pending).
+	if cp.Status.Phase == "" {
+		if err := r.setPending(ctx, cp, "Task submitted, waiting to start checkpointing"); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+
 	// retrieve the pod to checkpoint
 	p := &corev1.Pod{}
 	pName := types.NamespacedName{
@@ -125,81 +136,110 @@ func (r *CheckPointReconciler) reconcile(ctx context.Context, cp *kubeforenv1.Ch
 
 	if err := r.Get(ctx, pName, p); err != nil {
 		if apierrors.IsNotFound(err) {
-			log.Error(err, "Requested pod for checkpointing does not exist", "Pod")
-			// Pod doesn't exist , do not requeue until the user fixes the ressource
-			return ctrl.Result{}, nil
+			log.Error(err, "Requested pod for checkpointing does not exist")
+			// Pod doesn't exist , requeue only if failed to update status.
+			return ctrl.Result{}, r.setFailed(ctx, cp, "Requested pod does not exist")
 		}
 		log.Error(err, "Failed to fetch pod")
-		return ctrl.Result{}, err
-	}
 
-	c, err := utils.ExtractContainer(p.Spec.Containers, cp.Spec.ContainerName)
-	if err != nil {
-		log.Error(err, "Requested container does not exist in pod", "Container", cp.Spec.ContainerName)
-		// Requested container does not exist , do not requeue and wait for the user to fix the ressource
-		return ctrl.Result{}, nil
+		return ctrl.Result{}, err
 	}
 
 	node := p.Spec.NodeName
 	if node == "" {
+		// Possibly the pod hasn't been scheduled yet, we wait for some time and retry.
 		log.Error(errors.New("Node name field is empty"), "Requested pod for checkpointing have not been scheduled yet")
-		// the only possible reason for a missing node name field is that the pod wasn't
-		// scheduled yet.
-		// (TODO: the one minute period is somewhat random , find a better way to handle
-		//  this scenario).
 		return ctrl.Result{RequeueAfter: time.Minute}, nil
 	}
-	j := &batchv1.Job{}
-	jName := types.NamespacedName{
-		Name:      utils.CPJobNameGen(cp.Spec.PodName, c, cp.Spec.NameSpace),
-		Namespace: cp.Spec.NameSpace,
-	}
-	if err := r.Get(ctx, jName, j); err != nil {
-		if apierrors.IsAlreadyExists(err) {
-			success, err := r.checkJobSuccess(j)
-			if !success {
-				if err == nil {
-					// Job hasn't completed yet , do not requeue.
-					return ctrl.Result{}, nil
-				}
-				log.Error(err, "Could not run checkpointing job successfully")
-				// At this level , it is either a kubelet or a criu issue , eitherway
-				// we can't solve it , let the user fix it and retry.
-				return ctrl.Result{}, nil
-			}
 
-		}
-		log.Error(err, "Could not fetch job", "Job", j.Name)
-		return ctrl.Result{}, err
+	cp.Status.NodeName = node
+
+	c, err := utils.ExtractContainer(p.Spec.Containers, cp.Spec.ContainerName)
+	if err != nil {
+		log.Error(err, "Requested container does not exist in pod", "Container", cp.Spec.ContainerName)
+		// Requested container does not exist , do not requeue.
+		return ctrl.Result{}, r.setFailed(ctx, cp, "Requested container not found")
 	}
-	j = job.CreateJob(cp, c, node)
-	if err := r.Create(ctx, j); err != nil {
-		log.Error(err, "Failed to create job for checkpointing", "pod", cp.Spec.PodName, "namespace", cp.Spec.NameSpace)
-		return ctrl.Result{}, err
+
+	item, err := r.checkpointContainer(ctx, p.Namespace, p.Name, c, node)
+
+	if err != nil {
+		return ctrl.Result{}, r.setFailed(ctx, cp, err.Error())
 	}
-	return ctrl.Result{}, nil
+
+	return ctrl.Result{}, r.setReady(ctx, cp, item, "Container checkpointed successfully")
 
 }
 
-func (r *CheckPointReconciler) checkJobSuccess(j *batchv1.Job) (bool, error) {
-	if !job.IsTerminated(j) {
-		// job hasn't completed yet.
-		return false, nil
+func (r *CheckPointReconciler) reconcileDelete(ctx context.Context, cp *kubeforenv1.CheckPoint) error {
+	// For now we won't be deleting the actual checkpoints, we leave that to an external program.
+	return nil
+}
+
+func (r *CheckPointReconciler) setFailed(ctx context.Context, cp *kubeforenv1.CheckPoint, message string) error {
+	cp.Status.Phase = kubeforenv1.ContainerCheckpointFailed
+	meta.SetStatusCondition(&cp.Status.Conditions, metav1.Condition{
+		Type:               kubeforenv1.ConditionReady,
+		Status:             metav1.ConditionFalse,
+		Reason:             "CheckpointFailed",
+		Message:            message,
+		ObservedGeneration: cp.Generation,
+	})
+	return r.Status().Update(ctx, cp)
+}
+
+func (r *CheckPointReconciler) setPending(ctx context.Context, cp *kubeforenv1.CheckPoint, message string) error {
+	cp.Status.Phase = kubeforenv1.ContainerCheckpointPending
+	meta.SetStatusCondition(&cp.Status.Conditions, metav1.Condition{
+		Type:               kubeforenv1.ConditionReady,
+		Status:             metav1.ConditionUnknown,
+		Reason:             "CheckpointPending",
+		Message:            message,
+		ObservedGeneration: cp.Generation,
+	})
+	return r.Status().Update(ctx, cp)
+}
+
+func (r *CheckPointReconciler) setReady(ctx context.Context, cp *kubeforenv1.CheckPoint, item, message string) error {
+	cp.Status.Phase = kubeforenv1.ContainerCheckpointReady
+	cp.Status.CheckPointName = item
+	meta.SetStatusCondition(&cp.Status.Conditions, metav1.Condition{
+		Type:               kubeforenv1.ConditionReady,
+		Status:             metav1.ConditionTrue,
+		Reason:             "CheckpointReady",
+		Message:            message,
+		ObservedGeneration: cp.Generation,
+	})
+	return r.Status().Update(ctx, cp)
+}
+func (r *CheckPointReconciler) checkpointContainer(ctx context.Context, ns, p, c, n string) (string, error) {
+
+	req := r.KubeClient.CoreV1().RESTClient().Post().Resource("nodes").Name(n).SubResource("proxy", "checkpoint", ns, p, c)
+	res := req.Do(ctx)
+
+	data, err := res.Raw()
+
+	if err != nil {
+		return "", err
 	}
-	if job.IsSuccessful(j) {
-		return true, nil
+
+	var cres checkpointResponse
+
+	err = json.Unmarshal(data, &cres)
+	if err != nil {
+		return "", err
 	}
-	if fail, err := job.IsFailed(j); fail {
-		return false, err
+
+	if len(cres.Items) == 0 {
+		return "", errors.New("Checkpoint response contains no items")
 	}
-	return true, nil
+	return cres.Items[0], nil
 }
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *CheckPointReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&kubeforenv1alpha1.CheckPoint{}).
-		Owns(&batchv1.Job{}).
+		For(&kubeforenv1.CheckPoint{}).
 		Named("checkpoint").
 		Complete(r)
 }

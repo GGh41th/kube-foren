@@ -5,7 +5,13 @@ metadata:
   name: manager-role
 rules:
 - apiGroups:
-  - kubeforen.kubeforen.org
+  - ""
+  resources:
+  - nodes/proxy
+  verbs:
+  - create
+- apiGroups:
+  - kubeforen.org
   resources:
   - checkpoints
   verbs:
@@ -17,13 +23,13 @@ rules:
   - update
   - watch
 - apiGroups:
-  - kubeforen.kubeforen.org
+  - kubeforen.org
   resources:
   - checkpoints/finalizers
   verbs:
   - update
 - apiGroups:
-  - kubeforen.kubeforen.org
+  - kubeforen.org
   resources:
   - checkpoints/status
   verbs:

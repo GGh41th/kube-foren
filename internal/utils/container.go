@@ -12,9 +12,6 @@ func ExtractContainer(cs []corev1.Container, c string) (string, error) {
 	// We return the first container if the user didn't specify a container
 	// name
 	if c == "" {
-		if len(cs) == 0 {
-			return "", errors.New("Pod does not have containers , can't checkpoint")
-		}
 		return cs[0].Name, nil
 	}
 
