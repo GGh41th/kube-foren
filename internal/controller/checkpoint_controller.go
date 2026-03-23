@@ -93,7 +93,7 @@ func (r *CheckPointReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 
 	// Add finalizers if missing
 	if contains := controllerutil.ContainsFinalizer(cp, finalizerName); !contains {
-		patch := client.MergeFrom(cp)
+		patch := client.MergeFrom(cp.DeepCopy())
 		if updated := controllerutil.AddFinalizer(cp, finalizerName); updated {
 			if err := r.Patch(ctx, cp, patch); err != nil {
 				log.Error(err, "Failed to add finalizer", "finalizer", finalizerName)
